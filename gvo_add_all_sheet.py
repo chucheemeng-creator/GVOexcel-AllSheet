@@ -574,6 +574,7 @@ def main():
     sel_col = CHECK_COLS[selected - 1]
     name_map, task_map = {}, {}       # 去空白的名稱 → [實際名稱, 所選角色是否完成]
     task_names = {}                   # 任務／地圖 → 它底下的發現物名稱
+    name_rows = {}                    # 發現物名稱 → [(任務／地圖, 所選角色是否完成)]
     for rec in all_rows:
         cat, sr, src = rec["cat"], rec["row"], rec["src"]
         rec["task"] = cell_text(cat, sr, src["任務／地圖"])
@@ -588,6 +589,9 @@ def main():
             k = str(v).strip()
             e = mp.setdefault(k, [str(v), False])
             e[1] = e[1] or rec["tick1"]
+        if rec["name"] is not None:
+            name_rows.setdefault(str(rec["name"]).strip(), []).append(
+                (rec["task"], rec["tick1"]))
         if rec["task"] is not None and rec["name"] is not None:
             task_names.setdefault(rec["task"].strip(), []).append(str(rec["name"]).strip())
 
@@ -658,6 +662,15 @@ def main():
             return None
         q = re.split(r"[（(]", p)[0].strip()
         cands = [p] + ([q] if q and q != p else [])
+        # 0. 同名的發現物不只一筆（例如渾天儀、犀牛）→ 用括號裡的地圖指定是哪一筆
+        pm = re.search(r"[（(](.*)[)）]\s*$", p)
+        if pm and len(name_rows.get(q, [])) > 1:
+            for t in (pm.group(1).strip(), "圖：" + pm.group(1).strip()):
+                hit = [r for r in name_rows[q] if r[0] is not None and r[0].strip() == t]
+                if hit:
+                    return (f"{ALL_TABLE}[發現物]", f"{ALL_TABLE}[[þ]:[5]]",
+                            name_map[q][0], any(r[1] for r in hit),
+                            f"{ALL_TABLE}[{sref_name('任務／地圖')}]", hit[0][0])
         for c in cands:                               # 1. 完全相同
             r = exact(c)
             if r:
@@ -720,8 +733,10 @@ def main():
             if not known:
                 helpers.append(("const", "?"))
                 continue
-            terms = [f'COUNTIFS({rng},{criteria(name)},INDEX({ticks},0,{SELECT_CELL_ABS}),"?*")>0'
-                     for rng, ticks, name, _ in known]
+            terms = [f'COUNTIFS({r[0]},{criteria(r[2])},'
+                     + (f'{r[4]},{criteria(r[5])},' if len(r) > 4 else "")
+                     + f'INDEX({r[1]},0,{SELECT_CELL_ABS}),"?*")>0'
+                     for r in known]
             cond = terms[0] if len(terms) == 1 else f"AND({','.join(terms)})"
             f = f'IF({cond},{chr(34) + "?" + chr(34) if unknown else 1},0)'
             done1 = all(r[3] for r in known)
@@ -809,6 +824,20 @@ def main():
     row_parts = [inline(f"{out_col[h]}{HDR}", hdr_style[h], h) for h in OUT_HEADERS]
     out.append(f'<row r="{HDR}">{"".join(row_parts)}</row>')
 
+    # 視／考／宗 三欄在各分類放的技能不同，在表頭加一則註解說明
+    groups = {}
+    for cat in cats:
+        ni = col_to_num(cat.col(cat.name)); ti = col_to_num(cat.col("任務／地圖"))
+        key = "／".join(n for n in cat.names if ni < col_to_num(cat.col(n)) < ti)
+        groups.setdefault(key, []).append(cat.name)
+    tip = "這三欄（視、考、宗）在各分類放的是：\n" + "\n".join(
+        f"{k}：{'、'.join(v)}" for k, v in groups.items())
+    hc = col_to_num(out_col["視"]) - 1
+    comments.append((f'{out_col["視"]}{HDR}', "",
+                     f'<text><t xml:space="preserve">{escape(tip)}</t></text>',
+                     f"{hc + 1}, 15, {HDR - 1}, 10, {hc + 8}, 15, {HDR + 4 + len(groups)}, 4",
+                     HDR - 1, hc, HDR - 1, hc))
+
     for i, rec in enumerate(all_rows, start=HDR + 1):
         cat, sr, src = rec["cat"], rec["row"], rec["src"]
         parts = []
@@ -860,20 +889,23 @@ def main():
                     parts.append(c_xml(ref, def_style[h], "",
                                        f"<f>{escape(hp[1])}</f><v>{hp[2]}</v>"))
                 continue
-            if h == "前置發現3" and rec["merged"] is not None:
-                c3 = cat.cells.get((sr, src[h])) if src[h] else None
-                parts.append(inline(ref, c3.style if c3 and c3.style else def_style[h],
-                                    rec["merged"]))
-                continue
             sc = src.get(h)
             cell = cat.cells.get((sr, sc)) if sc else None
+            # 前置發現3、4 併成一格時，內容用合併後的文字，超連結和註解照樣帶過來
+            merged_here = h == "前置發現3" and rec["merged"] is not None
+            if merged_here:
+                parts.append(inline(ref, cell.style if cell is not None and cell.style
+                                    else def_style[h], rec["merged"]))
             if cell is None:
-                parts.append(c_xml(ref, def_style[h]))
+                if not merged_here:
+                    parts.append(c_xml(ref, def_style[h]))
                 continue
             style = cell.style or def_style[h]
             at = re.sub(r'\s*\bs="\d+"', "", cell.attrs)
             inner = cell.inner
-            if cell.has_formula():
+            if merged_here:
+                pass
+            elif cell.has_formula():
                 # 來源是公式 → 只留結果
                 v = cell.value(book.shared)
                 if v in (None, ""):
@@ -934,6 +966,36 @@ def main():
         block = re.sub(rf"\b{src_letter}(\d+)\b",
                        lambda mm: f"{new_letter}{int(mm.group(1)) + delta}", block)
         cf_parts.append(block)
+
+    # 其他分類頁的「接任地點」如果有史跡頁沒有的規則（例如海洋生物的「釣魚」），也補進來
+    take_letter = out_col["接任地點"]
+    seen_text = set(re.findall(r'<cfRule [^>]*\btext="([^"]*)"', "".join(cf_parts)))
+    extra_rules = []
+    for cat in cats:
+        if cat is style_cat:
+            continue
+        src_letter = next((cat.col(n) for n in cat.names if n.startswith("接任地點")), None)
+        if not src_letter:
+            continue
+        for block in re.findall(r"<conditionalFormatting .*?</conditionalFormatting>",
+                                cat.xml, re.S):
+            sq = attrs(re.match(r"<conditionalFormatting [^>]*>", block).group(0))["sqref"]
+            m = re.match(r"([A-Z]+)(\d+)", sq)
+            if not m or m.group(1) != src_letter:
+                continue
+            delta = (HDR + 1) - int(m.group(2))
+            for rule in re.findall(r"<cfRule [^>]*?(?:/>|>.*?</cfRule>)", block, re.S):
+                text = attrs(re.match(r"<cfRule [^>]*>", rule).group(0)).get("text")
+                if text is None or text in seen_text:
+                    continue
+                seen_text.add(text)
+                rule = re.sub(rf"\b{src_letter}(\d+)\b",
+                              lambda mm: f"{take_letter}{int(mm.group(1)) + delta}", rule)
+                rule = re.sub(r'priority="\d+"', f'priority="{50 + len(extra_rules)}"', rule)
+                extra_rules.append(rule)
+    if extra_rules:
+        cf_parts.append(f'<conditionalFormatting sqref="{take_letter}{HDR + 1}:'
+                        f'{take_letter}{n_rows}">{"".join(extra_rules)}</conditionalFormatting>')
 
     # 前置發現上色：綠＝已完成、紅＝未完成（依隱藏的 前1～前3 欄）
     green = styles.dxf('<dxf><font><color rgb="FF006100"/></font><fill><patternFill>'
