@@ -862,7 +862,9 @@ def main():
                 tgt = f"{cat.table}[{sref_name(h)}]"
                 match = (f"MATCH({ALL_TABLE}[[#This Row],[{sref_name(key_here)}]],"
                          f"{cat.table}[{sref_name(key_there)}],0)")
-                f = f'IFERROR(IF(INDEX({tgt},{match})="","",INDEX({tgt},{match})),"")'
+                # &"" 讓來源空白時得到 ""（INDEX 直接回傳空白格會變成 0），有值時照原樣；
+                # 這樣每格只查一次 MATCH（以前先查一次看是不是空白、不是再查一次）
+                f = f'IFERROR(INDEX({tgt},{match})&"","")'
                 cached = cell.value(book.shared) if cell else None
                 cached = "" if cached is None else cached
                 parts.append(c_xml(ref, style, ' t="str"',
